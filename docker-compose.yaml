@@ -1,0 +1,90 @@
+# Bulwark webmail + its JMAP<->IMAP bridge, deployed by Coolify.
+#
+# Bulwark speaks JMAP only. `legacy-proxy` (same project) sits in front of the
+# existing IMAP/SMTP stack, so no mail is moved and no MX record changes.
+#
+# Two hostnames:
+#   mail2.<domain>  -> webmail      (the UI)
+#   jmap.<domain>   -> legacy-proxy (JMAP API the browser talks to directly)
+#
+# Nothing publishes a host port; Traefik terminates TLS.
+
+services:
+  legacy-proxy:
+    image: ghcr.io/bulwarkmail/legacy-proxy@sha256:c033c05107f8f802dcafc6f981d19061472d30c0e7006f8f051fb2ab9777cc47
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      PORT: 8080
+      DATA_DIR: /data
+      LOG_LEVEL: info
+      PUBLIC_URL: ${JMAP_PUBLIC_URL}
+      VAULT_KEY: ${VAULT_KEY}
+      SESSION_HMAC_KEY: ${SESSION_HMAC_KEY}
+      DEFAULT_PROVIDER: mxroute
+      PROVIDERS_FILE: /etc/legacy-proxy/providers.json
+    volumes:
+      - proxy_data:/data
+    configs:
+      - source: providers
+        target: /etc/legacy-proxy/providers.json
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  webmail:
+    image: ghcr.io/bulwarkmail/webmail:1.21.1
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      NODE_ENV: production
+      # Setting this puts Bulwark in env-managed mode: the setup wizard is skipped.
+      JMAP_SERVER_URL: ${JMAP_PUBLIC_URL}
+      SESSION_SECRET: ${BULWARK_SESSION_SECRET}
+      COOKIE_SECURE: "true"
+    volumes:
+      - bulwark_data:/app/data
+    depends_on:
+      legacy-proxy:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+# Provider catalogue is inlined so the deploy needs no bind mount from the repo
+# checkout (Coolify deploys the compose content, not the working tree).
+configs:
+  providers:
+    content: |
+      {
+        "mxroute": {
+          "domains": [
+            "382972.xyz",
+            "058637.xyz",
+            "onlykleins.com",
+            "248232.xyz",
+            "ouroboric.ai",
+            "120319.xyz",
+            "joshuakle.in"
+          ],
+          "imap": { "host": "safari.mxrouting.net", "port": 993, "secure": true },
+          "smtp": { "host": "safari.mxrouting.net", "port": 465, "secure": true },
+          "sieve": null,
+          "carddav": null,
+          "auth": { "mech": ["PLAIN", "LOGIN"] }
+        }
+      }
+
+volumes:
+  proxy_data:
+  bulwark_data:
